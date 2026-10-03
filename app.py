@@ -1,4 +1,5 @@
 import os
+import re
 import json
 from datetime import datetime
 import streamlit as st
@@ -24,7 +25,6 @@ try:
             with open("token.json", "w") as f:
                 f.write(st.secrets["GOOGLE_TOKEN_JSON"])
 except Exception:
-    # Local environment mein secrets.toml na ho toh ignore karke .env use karega
     pass
 
 # ---------------------------------------------------------
@@ -32,9 +32,40 @@ except Exception:
 # ---------------------------------------------------------
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
 from graph.workflow import build_graph
+from rag.agent import process_and_index_pdf
 
 # ---------------------------------------------------------
-# 3. Page Configuration & Company Branding Setup
+# 3. Security Guardrails Logic (Directly Embedded)
+# ---------------------------------------------------------
+BLOCKED_PATTERNS = [
+    r"ignore (all )?previous instructions",
+    r"reveal (the )?system prompt",
+    r"show me (the )?api[-_]?key",
+    r"groq_api_key",
+    r"pinecone_api_key",
+    r"token\.json",
+    r"credentials\.json",
+    r"bypass security",
+    r"delete repository"
+]
+
+def apply_input_guardrail(query: str) -> tuple[bool, str]:
+    """Prompt injection aur sensitive keys leak hone se protect karta hai."""
+    q_lower = query.lower().strip()
+    
+    # Check 1: Size limit
+    if len(query) > 3000:
+        return False, "⚠️ Security Guardrail: Prompt bohot bara hai (3,000 characters limit se ziada)."
+    
+    # Check 2: Pattern match
+    for pattern in BLOCKED_PATTERNS:
+        if re.search(pattern, q_lower):
+            return False, "🛡️ Security Guardrail: Request blocked! Prompt injection ya internal credentials access allow nahi hai."
+            
+    return True, "Passed"
+
+# ---------------------------------------------------------
+# 4. Page Configuration & Company Branding Setup
 # ---------------------------------------------------------
 COMPANY_NAME = "SMIT LangGraph Agent"
 TAGLINE = "Enterprise Autonomous Multi-Agent Orchestrator"
@@ -48,7 +79,7 @@ st.set_page_config(
 )
 
 # ---------------------------------------------------------
-# 4. Custom Styling (Modern Dark Theme Look)
+# 5. Custom Styling (Modern Dark Theme Look)
 # ---------------------------------------------------------
 st.markdown("""
 <style>
@@ -90,6 +121,7 @@ st.markdown("""
     .pill-rag { background-color: rgba(56, 189, 248, 0.15); color: #38BDF8; }
     .pill-github { background-color: rgba(192, 132, 252, 0.15); color: #C084FC; }
     .pill-google { background-color: rgba(74, 222, 128, 0.15); color: #4ADE80; }
+    .pill-guardrail { background-color: rgba(244, 63, 94, 0.15); color: #FB7185; }
     .stChatInput {
         border-radius: 16px;
     }
@@ -97,7 +129,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ---------------------------------------------------------
-# 5. Initialize LangGraph State Machine
+# 6. Initialize LangGraph State Machine
 # ---------------------------------------------------------
 @st.cache_resource
 def get_graph():
@@ -105,12 +137,11 @@ def get_graph():
 
 graph = get_graph()
 
-# Session State for Messages
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
 # ---------------------------------------------------------
-# 6. Export Helpers (Markdown & JSON)
+# 7. Export Helpers (Markdown & JSON)
 # ---------------------------------------------------------
 def prepare_export_markdown(messages):
     lines = [
@@ -140,16 +171,32 @@ def prepare_export_json(messages):
     return json.dumps(payload, indent=2)
 
 # ---------------------------------------------------------
-# 7. Sidebar Controls, Status & Downloads
+# 8. Sidebar Controls (PDF Upload + Status + Export)
 # ---------------------------------------------------------
 with st.sidebar:
     st.markdown(f"### {COMPANY_LOGO_ICON} {COMPANY_NAME}")
     st.caption("Agent Orchestration Management")
 
-    st.subheader("Sub-Agents Status")
+    st.subheader("System Status")
     st.success("🟢 Pinecone Vector RAG")
     st.success("🟢 GitHub Live REST API")
     st.success("🟢 Google Workspace API")
+    st.success("🛡️ Safety Guardrails Active")
+
+    st.divider()
+    st.subheader("📄 Upload PDF to Memory")
+    uploaded_file = st.file_uploader("Nayi PDF file drop karein:", type=["pdf"])
+
+    if uploaded_file is not None:
+        if "last_uploaded" not in st.session_state or st.session_state.last_uploaded != uploaded_file.name:
+            with st.spinner("PDF read aur memory mein index ho rahi hai..."):
+                file_bytes = uploaded_file.read()
+                success, msg = process_and_index_pdf(file_bytes, uploaded_file.name)
+                if success:
+                    st.session_state.last_uploaded = uploaded_file.name
+                    st.success(f"✅ {uploaded_file.name} memory mein save ho gayi!")
+                else:
+                    st.error(msg)
     
     st.divider()
     st.subheader("⚡ Quick Prompts")
@@ -158,7 +205,7 @@ with st.sidebar:
     if st.button("🐙 Fetch GitHub Issues", use_container_width=True):
         st.session_state.preset_prompt = "GitHub repository 'psf/requests' ke open issues check karo."
     if st.button("📄 RAG Document Query", use_container_width=True):
-        st.session_state.preset_prompt = "Document (PDF) ke mutabiq policy details batao."
+        st.session_state.preset_prompt = "Document (PDF) ke mutabiq details batao."
 
     st.divider()
     st.subheader("💾 Export & Session")
@@ -185,12 +232,12 @@ with st.sidebar:
     else:
         st.caption("Export buttons activate once messages are sent.")
 
-    if st.button("🗑️️ Clear Session", use_container_width=True):
+    if st.button("🗑️ Clear Session", use_container_width=True):
         st.session_state.messages = []
         st.rerun()
 
 # ---------------------------------------------------------
-# 8. Main Workspace Hero Header
+# 9. Main Workspace Hero Header
 # ---------------------------------------------------------
 st.markdown(f"""
 <div class="brand-header">
@@ -200,12 +247,13 @@ st.markdown(f"""
         <span class="subagent-pill pill-rag">Hosted Pinecone RAG</span>
         <span class="subagent-pill pill-github">Live GitHub API</span>
         <span class="subagent-pill pill-google">Google Workspace OAuth 2.0</span>
+        <span class="subagent-pill pill-guardrail">Injection Guardrails Shield</span>
     </div>
 </div>
 """, unsafe_allow_html=True)
 
 # ---------------------------------------------------------
-# 9. Render Chat History
+# 10. Render Chat History
 # ---------------------------------------------------------
 for msg in st.session_state.messages:
     role = "user" if isinstance(msg, HumanMessage) else "assistant"
@@ -213,7 +261,7 @@ for msg in st.session_state.messages:
         st.markdown(msg.content)
 
 # ---------------------------------------------------------
-# 10. User Input & Streaming Orchestration
+# 11. User Input, Guardrails Check & Execution
 # ---------------------------------------------------------
 user_query = st.chat_input("Ask a question, query code repositories, or manage your schedule...")
 
@@ -222,35 +270,43 @@ if "preset_prompt" in st.session_state and st.session_state.preset_prompt:
     st.session_state.preset_prompt = None
 
 if user_query:
+    # --- YAHAN GUARDRAIL CHECK HO RAHA HAI ---
+    is_safe, guardrail_notice = apply_input_guardrail(user_query)
+
     st.session_state.messages.append(HumanMessage(content=user_query))
     with st.chat_message("user"):
         st.markdown(user_query)
 
     with st.chat_message("assistant"):
-        with st.status("Coordinating sub-agents...", expanded=True) as status:
-            final_content = ""
-            state_input = {"messages": st.session_state.messages}
-            
-            try:
-                for event in graph.stream(state_input, stream_mode="values"):
-                    last_msg = event["messages"][-1]
-                    
-                    if isinstance(last_msg, AIMessage) and last_msg.tool_calls:
-                        for tool in last_msg.tool_calls:
-                            t_name = tool.get('name', 'tool')
-                            status.write(f"⚡ **Sub-agent invoked:** `{t_name}`")
-                            
-                    elif isinstance(last_msg, ToolMessage):
-                        status.write("📥 Successfully received payload from external agent...")
-                        
-                    elif isinstance(last_msg, AIMessage) and last_msg.content:
-                        final_content = last_msg.content
-                        
-                status.update(label="All agent tasks completed!", state="complete", expanded=False)
-                st.markdown(final_content)
-                st.session_state.messages.append(AIMessage(content=final_content))
-                st.rerun()
+        if not is_safe:
+            # Agar prompt unsafe ho toh LLM call nahi hoga, direct warning dikhegi
+            st.warning(guardrail_notice)
+            st.session_state.messages.append(AIMessage(content=guardrail_notice))
+        else:
+            with st.status("Coordinating sub-agents...", expanded=True) as status:
+                final_content = ""
+                state_input = {"messages": st.session_state.messages}
                 
-            except Exception as e:
-                status.update(label="Agent Coordination Error", state="error")
-                st.error(f"Error executing agent workflow: {str(e)}")
+                try:
+                    for event in graph.stream(state_input, stream_mode="values"):
+                        last_msg = event["messages"][-1]
+                        
+                        if isinstance(last_msg, AIMessage) and last_msg.tool_calls:
+                            for tool in last_msg.tool_calls:
+                                t_name = tool.get('name', 'tool')
+                                status.write(f"⚡ **Sub-agent invoked:** `{t_name}`")
+                                
+                        elif isinstance(last_msg, ToolMessage):
+                            status.write("📥 Successfully received payload from external agent...")
+                            
+                        elif isinstance(last_msg, AIMessage) and last_msg.content:
+                            final_content = last_msg.content
+                            
+                    status.update(label="All agent tasks completed!", state="complete", expanded=False)
+                    st.markdown(final_content)
+                    st.session_state.messages.append(AIMessage(content=final_content))
+                    st.rerun()
+                    
+                except Exception as e:
+                    status.update(label="Agent Coordination Error", state="error")
+                    st.error(f"Error executing agent workflow: {str(e)}")
